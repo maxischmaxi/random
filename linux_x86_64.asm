@@ -24,7 +24,7 @@
 ; This saves an entire program header segment and simplifies the binary.
 ;
 ; Build & Run:
-;   make && ./main
+;   make linux && ./random-linux-x86_64
 ;
 ; ============================================================================
 
