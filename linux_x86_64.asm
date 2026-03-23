@@ -213,238 +213,171 @@ phdr_size equ $ - phdr         ; = 56 bytes
 ; From here on is the actual executable code. The kernel jumps here after
 ; loading the binary (because e_entry points to _start).
 ;
-; Instead of BSS memory (which would require an extra segment), we use the
-; stack. The stack is a memory region that the kernel automatically sets up
-; for every process. It grows from high to low addresses.
+; Usage: ./random [N]
+;   N = number of random bytes to generate (default: 32)
+;   Output: 2*N hex characters + newline
 ;
-; Stack layout after "sub rsp, 97":
+; At _start, the kernel has placed the following on the stack:
 ;
-;   Address          Contents            Size
-;   ────────────     ──────────────      ─────
-;   rsp + 0          raw_bytes           32 bytes (random data from kernel)
-;   rsp + 32         hex_out             64 bytes (hex characters as ASCII)
-;   rsp + 96         newline ('\n')       1 byte
-;                                        ───────
-;                                Total:  97 bytes
+;   [rsp]      = argc        (number of arguments, including program name)
+;   [rsp+8]    = argv[0]     (pointer to program name string, e.g. "./random")
+;   [rsp+16]   = argv[1]     (pointer to first argument string, if argc >= 2)
+;   [rsp+24]   = argv[2]     (or NULL terminator if argc == 2)
+;   ...
+;
+; After parsing the argument and allocating the buffer, the stack layout is:
+;
+;   rsp + 0         .. rsp + N-1        = raw_bytes  (N random bytes)
+;   rsp + N         .. rsp + 3*N-1      = hex_out    (2*N hex characters)
+;   rsp + 3*N                           = newline    (1 byte)
+;
+; r12d holds N throughout the program (callee-saved, survives syscalls).
 ;
 ; ****************************************************************************
 
 _start:
     ; ====================================================================
-    ; STEP 1: Reserve space on the stack
+    ; STEP 1: Parse command line argument (or use default)
     ; ====================================================================
-    sub rsp, 97                ; Move RSP (Stack Pointer) 97 bytes downward.
-                               ; "sub" = subtract. Since the stack grows downward,
-                               ; subtracting reserves space.
-                               ; The region rsp+0 through rsp+96 now belongs to us.
+    ;
+    ; We read argc from [rsp]. If argc >= 2, argv[1] exists and we parse
+    ; it as a decimal integer. Otherwise we default to 32 bytes.
+    ;
+    ; The parsing loop implements a simple atoi: for each ASCII digit
+    ; character ('0'–'9'), multiply the accumulator by 10 and add the
+    ; digit value. Stop at the first non-digit character or end of string.
+    ; --------------------------------------------------------------------
+    mov r12d, 32               ; r12d = default byte count (32)
+
+    cmp qword [rsp], 2        ; argc >= 2? (argc is a 64-bit value on the stack)
+    jl .alloc                  ; No argument provided → skip parsing, use default
+
+    mov rsi, [rsp+16]         ; rsi = pointer to argv[1] (the argument string)
+    xor eax, eax              ; eax = accumulator for parsed number, starts at 0
+
+.parse:
+    movzx ecx, byte [rsi]    ; Load next ASCII character from the string
+    sub ecx, '0'              ; Convert ASCII to digit: '0'→0, '1'→1, ..., '9'→9
+                               ; If the character was below '0', ecx underflows
+                               ; to a large number (unsigned), caught by cmp below.
+    cmp ecx, 9                ; Is it a valid digit (0–9)?
+    ja .parse_done             ; "Jump if Above" (unsigned): if ecx > 9, it's not
+                               ; a digit → stop parsing. This also catches negative
+                               ; values from the sub (they wrap to large unsigned).
+    imul eax, eax, 10         ; accumulator *= 10 (shift decimal place left)
+                               ; "imul" with 3 operands: dest = src1 * src2
+    add eax, ecx              ; accumulator += current digit
+    inc rsi                    ; Advance to next character
+    jmp .parse                 ; Continue parsing loop
+
+.parse_done:
+    test eax, eax             ; Did we parse a valid number? (eax == 0 means no
+                               ; digits were found, e.g. "./random abc")
+    cmovnz r12d, eax          ; If non-zero, use parsed value; otherwise keep default.
+                               ; "cmovnz" = Conditional Move if Not Zero. Avoids a
+                               ; branch: r12d = (eax != 0) ? eax : r12d.
 
     ; ====================================================================
-    ; STEP 2: Get 32 cryptographically secure random bytes from the kernel
+    ; STEP 2: Allocate stack space for buffers
+    ; ====================================================================
+    ;
+    ; We need: N bytes (raw) + 2*N bytes (hex) + 1 byte (newline) = 3*N + 1
+    ; Round up to 16-byte alignment (required by ABI for stack operations).
+    ; --------------------------------------------------------------------
+.alloc:
+    lea eax, [r12 + r12*2 + 1] ; eax = 3*N + 1. LEA can compute this in one
+                               ; instruction using base + index*scale + displacement.
+                               ; r12 is the base, r12*2 is the index with scale 2,
+                               ; +1 is the displacement. Total: r12 + 2*r12 + 1 = 3*r12 + 1.
+    add eax, 15               ; Round up to next multiple of 16:
+    and eax, -16               ; -16 in binary is ...11110000, so AND clears the
+                               ; lower 4 bits, rounding down to the nearest 16.
+                               ; Combined with the +15 above, this rounds UP.
+    sub rsp, rax               ; Allocate the aligned buffer space on the stack.
+
+    ; ====================================================================
+    ; STEP 3: Get N cryptographically secure random bytes from the kernel
     ; ====================================================================
     ;
     ; Linux syscall convention for x86_64:
-    ;   rax = syscall number (which kernel function to call)
-    ;   rdi = 1st argument
-    ;   rsi = 2nd argument
-    ;   rdx = 3rd argument
-    ;   r10 = 4th argument  (not used here)
-    ;   r8  = 5th argument  (not used here)
-    ;   r9  = 6th argument  (not used here)
-    ;   → return value is placed in rax
+    ;   rax = syscall number, rdi/rsi/rdx = arguments, rax = return value
     ;
-    ; Syscall: getrandom(buf, buflen, flags)
-    ;   - Provides cryptographically secure random numbers directly from the kernel
-    ;   - Like reading /dev/urandom, but without file I/O (faster, simpler)
-    ;   - The same entropy source that OpenSSL/Node.js use
+    ; getrandom() may return fewer bytes than requested (partial read),
+    ; so we loop until all N bytes have been written.
     ; --------------------------------------------------------------------
-    mov eax, 318               ; Syscall number 318 = getrandom
-                               ; We write to eax (32-bit) instead of rax (64-bit).
-                               ; On x86_64, writing to a 32-bit register automatically
-                               ; zeroes the upper 32 bits. This saves 1 byte of machine
-                               ; code (no REX prefix needed).
+    mov r13d, r12d             ; r13d = remaining bytes to generate
+    mov r14, rsp               ; r14 = current write position in raw_bytes buffer
 
-    mov rdi, rsp               ; 1st arg: pointer to the buffer = rsp (raw_bytes)
-                               ; This must be rdi (64-bit) because addresses on
-                               ; x86_64 are always 64 bits wide.
-
-    mov esi, 32                ; 2nd arg: number of bytes = 32 (256 bits of randomness)
-                               ; Again a 32-bit register (esi) to save 1 byte.
-
-    xor edx, edx              ; 3rd arg: flags = 0 (like /dev/urandom)
-                               ; "xor x, x" is the fastest way to zero a register:
-                               ; every bit XOR'd with itself = 0.
-                               ; Produces only 2 bytes of machine code, while
-                               ; "mov edx, 0" requires 5 bytes.
-                               ; Flag 0 = non-blocking, uses the urandom pool.
-
-    syscall                    ; Context switch into the kernel. The kernel:
-                               ;   1. Reads 32 bytes from the entropy pool
-                               ;   2. Writes them to the address in rdi (= rsp)
-                               ;   3. Returns the number of bytes written in rax
-                               ; Execution continues here afterwards.
+.random_loop:
+    mov eax, 318               ; Syscall 318 = getrandom
+    mov rdi, r14               ; 1st arg: buffer = current write position
+    mov esi, r13d              ; 2nd arg: count = remaining bytes
+    xor edx, edx              ; 3rd arg: flags = 0 (non-blocking, urandom pool)
+    syscall                    ; Returns number of bytes actually written in rax
+    add r14, rax               ; Advance write position by bytes written
+    sub r13d, eax              ; Decrease remaining count
+    jnz .random_loop           ; If remaining > 0, request more bytes
 
     ; ====================================================================
-    ; STEP 3: Convert raw bytes to hex string
+    ; STEP 4: Convert raw bytes to hex string
     ; ====================================================================
     ;
-    ; Core principle of hex conversion:
+    ; Each byte is split into two 4-bit nibbles and converted to a hex
+    ; character via the lookup table. See earlier comments in this file
+    ; for a detailed explanation of the nibble extraction technique.
     ;
-    ; A byte has 8 bits, i.e. 2 "nibbles" (half-bytes) of 4 bits each.
-    ; Each nibble has a value of 0–15, which corresponds exactly to one
-    ; hex digit (0–9, a–f). We split each byte into its two nibbles and
-    ; look up the corresponding ASCII characters in a table.
-    ;
-    ; Example: byte 0xB3 (decimal 179, binary 10110011)
-    ;
-    ;   Upper nibble:  10110011 >> 4 = 00001011 = 11 (decimal)
-    ;                  hex_table[11] = 'b'
-    ;
-    ;   Lower nibble:  10110011 & 0x0F = 00000011 = 3 (decimal)
-    ;                  hex_table[3]  = '3'
-    ;
-    ;   Result: "b3"
-    ;
-    ; Register assignments for the loop:
-    ;   rsi = read pointer  (walks through raw_bytes)
-    ;   rdi = write pointer (walks through hex_out)
-    ;   rbx = base address of hex_table (stays constant)
-    ;   ecx = loop counter  (32 → 0)
+    ; Register assignments:
+    ;   rsi = read pointer  (raw_bytes at rsp + 0)
+    ;   rdi = write pointer (hex_out at rsp + N)
+    ;   rbx = base address of hex_table
+    ;   ecx = loop counter (N → 0)
     ; --------------------------------------------------------------------
-    mov rsi, rsp               ; rsi = read pointer, points to raw_bytes (rsp + 0)
-
-    lea rdi, [rsp + 32]        ; rdi = write pointer, points to hex_out (rsp + 32)
-                               ; lea = "Load Effective Address": computes the address
-                               ; rsp + 32 without reading the memory at that address.
-                               ; Unlike "mov rdi, [rsp+32]" (which reads the VALUE),
-                               ; lea loads the ADDRESS itself.
-
-    lea rbx, [rel hex_table]   ; rbx = address of the lookup table "0123456789abcdef"
-                               ; [rel hex_table] = RIP-relative addressing.
-                               ; The assembler calculates the distance between this
-                               ; instruction and hex_table and encodes it as an offset.
-                               ; "rel" is needed because we're in flat binary mode
-                               ; (no "default rel" directive).
-
-    mov ecx, 32                ; ecx = 32 bytes to process (loop counter)
+    mov rsi, rsp               ; Read pointer → start of raw_bytes
+    lea rdi, [rsp + r12]      ; Write pointer → hex_out starts at rsp + N
+    lea rbx, [rel hex_table]   ; Lookup table address (RIP-relative)
+    mov ecx, r12d              ; Loop counter = N
 
 .loop:
-    ; --- Load one raw byte from the source ---
-    movzx eax, byte [rsi]     ; Reads exactly 1 byte from the address in rsi.
-                               ; "movzx" = Move with Zero-Extend:
-                               ;   - Reads 1 byte (8 bits)
-                               ;   - Extends it to 32 bits by filling the upper
-                               ;     24 bits with zeros
-                               ;   - Stores the result in eax
-                               ; Why not just "mov al, [rsi]"? Because the upper
-                               ; bits of rax would remain undefined, which could
-                               ; produce wrong results with the later "and eax, 0x0F".
-                               ; movzx guarantees clean upper bits.
-                               ; "byte" is a size hint for NASM (read 1 byte).
+    movzx eax, byte [rsi]     ; Load one raw byte, zero-extended to 32 bits
 
-    ; --- Extract upper nibble (bits 7–4) ---
-    mov edx, eax              ; Copy the byte into edx, because we still need eax
-                               ; for the lower nibble and are about to shift destructively.
+    mov edx, eax              ; Copy for upper nibble extraction
+    shr edx, 4                ; Upper nibble: shift right 4 → index 0–15
+    mov dl, [rbx + rdx]       ; Look up hex character
+    mov [rdi], dl              ; Write to output buffer
+    inc rdi
 
-    shr edx, 4                ; Shift Right by 4 positions:
-                               ; Moves all bits 4 places to the right.
-                               ; The upper 4 bits land at positions 3–0,
-                               ; the lower 4 bits fall off (are discarded).
-                               ; Example: 0xB3 = 10110011
-                               ;   shr 4 → 00001011 = 0x0B = 11
-                               ; Result: a value 0–15 = index into hex_table.
+    and eax, 0x0F              ; Lower nibble: mask to index 0–15
+    mov al, [rbx + rax]       ; Look up hex character
+    mov [rdi], al              ; Write to output buffer
+    inc rdi
 
-    mov dl, [rbx + rdx]       ; Look up in the table:
-                               ; rbx = base address of hex_table ("0123456789abcdef")
-                               ; rdx = index (0–15)
-                               ; rbx + rdx = address of the hex character
-                               ; dl = the byte read (lower byte of rdx)
-                               ; Example: rbx + 11 → hex_table[11] = 'b' (ASCII 0x62)
-
-    mov [rdi], dl              ; Write the hex character to the current write position
-                               ; in the output buffer on the stack.
-
-    inc rdi                    ; Advance write pointer by 1 byte (next position).
-                               ; inc = increment = add 1. Shorter than "add rdi, 1".
-
-    ; --- Extract lower nibble (bits 3–0) ---
-    and eax, 0x0F              ; Bitwise AND with 0x0F = 00001111:
-                               ; Clears the upper 4 bits, keeps the lower 4.
-                               ; Example: 0xB3 = 10110011
-                               ;   and 0x0F → 00000011 = 0x03 = 3
-                               ; Result: index 0–15 for hex_table.
-
-    mov al, [rbx + rax]       ; hex_table[3] = '3' (ASCII 0x33)
-                               ; al = lower byte of rax (the result character)
-
-    mov [rdi], al              ; Write hex character to the output buffer.
-    inc rdi                    ; Advance write pointer.
-
-    ; --- Loop control ---
-    inc rsi                    ; Advance read pointer to the next raw byte.
-
-    dec ecx                    ; Decrement loop counter by 1.
-                               ; dec = decrement = subtract 1.
-                               ; Automatically sets the Zero Flag (ZF) in RFLAGS
-                               ; when the result is 0.
-
-    jnz .loop                  ; "Jump if Not Zero": jump back to .loop as long
-                               ; as ZF = 0 (i.e. ecx != 0).
-                               ; After 32 iterations, ecx = 0, ZF = 1, and the
-                               ; jump is NOT taken → falls through to below.
-                               ; The dot before ".loop" makes it a local label
-                               ; (visible only within the enclosing global label).
+    inc rsi                    ; Next input byte
+    dec ecx
+    jnz .loop                  ; Repeat for all N bytes
 
     ; ====================================================================
-    ; STEP 4: Append newline and write the result to stdout
+    ; STEP 5: Append newline and write the result to stdout
     ; ====================================================================
-    mov byte [rdi], 10         ; ASCII 10 = Line Feed ('\n'). After the loop, rdi
-                               ; points to rsp + 96 (position 64 in the hex_out buffer).
-                               ; "byte" tells NASM we only want to write 1 byte
-                               ; (needed because [rdi] alone doesn't determine the size).
+    mov byte [rdi], 10         ; Append newline (ASCII 10 = '\n')
 
-    ; Syscall: write(fd, buf, count)
-    ;   - Writes count bytes from buf to the file descriptor fd
-    ;   - fd 1 = stdout = standard output (the terminal)
-    mov eax, 1                 ; Syscall number 1 = write
+    mov eax, 1                 ; Syscall 1 = write
     mov edi, 1                 ; 1st arg: fd = 1 (stdout)
-    lea rsi, [rsp + 32]        ; 2nd arg: pointer to hex_out (rsp + 32)
-    mov edx, 65                ; 3rd arg: 65 bytes (64 hex characters + 1 newline)
-    syscall                    ; Kernel writes the string to the terminal.
-                               ; Returns in rax: number of bytes written (or error).
+    lea rsi, [rsp + r12]      ; 2nd arg: buffer = hex_out (at rsp + N)
+    lea edx, [r12 + r12 + 1]  ; 3rd arg: count = 2*N + 1 (hex chars + newline)
+    syscall
 
     ; ====================================================================
-    ; STEP 5: Exit the program cleanly
+    ; STEP 6: Exit the program cleanly
     ; ====================================================================
-    ; Without this syscall, the CPU would simply interpret the next bytes
-    ; in memory as instructions (here: hex_table = "0123456789abcdef").
-    ; Since that's not valid code → segmentation fault or undefined behavior.
-    ; exit() returns control to the kernel, which cleans up the process
-    ; (frees memory, closes file descriptors, etc.).
-    ;
-    ; Syscall: exit(status)
-    ;   - Terminates the process with the given exit code
-    ;   - Exit code 0 = success (convention)
-    ;   - This syscall NEVER returns
-    mov eax, 60                ; Syscall number 60 = exit
-    xor edi, edi               ; 1st arg: exit code = 0 (xor edi,edi → edi = 0)
-    syscall                    ; Process is terminated. Everything after is unreachable.
+    mov eax, 60                ; Syscall 60 = exit
+    xor edi, edi               ; Exit code 0
+    syscall
 
 
 ; ****************************************************************************
 ; *                         CONSTANT DATA                                    *
 ; ****************************************************************************
-;
-; These 16 bytes are the only data in the entire file.
-; They form the hex lookup table: index 0 → '0', index 10 → 'a', etc.
-;
-; Since we're in flat binary mode, these bytes sit directly after the last
-; syscall opcode in the file — no section overhead, no padding.
-; ****************************************************************************
 
 hex_table: db "0123456789abcdef"
 
-; file_size calculates the total file size at assembly time:
-; $ = current position (end of file), ehdr = start of file.
-; We use this value above in the program header (p_filesz / p_memsz),
-; so the kernel knows how many bytes to load.
 file_size equ $ - ehdr
