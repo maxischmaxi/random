@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Build
+        run: make
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: random
+          generate_release_notes: true
