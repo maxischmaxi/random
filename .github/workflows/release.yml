@@ -12,7 +12,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install NASM
         run: sudo apt-get update && sudo apt-get install -y nasm
@@ -20,7 +20,7 @@ jobs:
       - name: Build
         run: make linux
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: random-linux-x86_64
           path: random-linux-x86_64
@@ -28,7 +28,7 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install NASM
         run: brew install nasm
@@ -38,7 +38,7 @@ jobs:
           make macos-arm
           make macos-intel
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: random-macos
           path: |
@@ -48,7 +48,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install NASM
         run: choco install nasm -y
@@ -62,7 +62,7 @@ jobs:
           set PATH=C:\Program Files\NASM;%PATH%
           make windows
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: random-windows-x86_64
           path: random-windows-x86_64.exe
@@ -71,7 +71,7 @@ jobs:
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           merge-multiple: true
 
