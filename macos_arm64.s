@@ -95,10 +95,14 @@ _start:
     mov x19, sp                // x19 = read pointer (raw_bytes at sp+0)
     add x20, sp, #32           // x20 = write pointer (hex_out at sp+32)
                                // "add" computes sp + 32 and stores in x20.
-    adr x21, hex_table         // x21 = address of hex lookup table.
-                               // "adr" = Address of label (PC-relative).
-                               // Works for labels within ±1 MB of current PC.
-                               // More compact than adrp+add for nearby data.
+    adrp x21, hex_table@PAGE   // x21 = page-aligned base address of hex_table.
+                               // "adrp" = Address of Register Page. Loads the 4 KB
+                               // page address containing the label (PC-relative).
+                               // Needed because hex_table is in .data (different
+                               // section), and "adr" can't cross section boundaries.
+    add x21, x21, hex_table@PAGEOFF // Add the page offset to get the exact address.
+                               // @PAGE = which 4 KB page, @PAGEOFF = offset within
+                               // that page. Together they form the full address.
     mov x22, #32               // x22 = loop counter (32 bytes to process)
 
 .loop:

@@ -6,7 +6,7 @@ linux: linux_x86_64.asm
 
 macos-intel: macos_x86_64.asm
 	$(ASM) -f macho64 $< -o macos_x86_64.o
-	ld -e _start -o random-macos-x86_64 macos_x86_64.o -lSystem -syslibroot $$(xcrun --show-sdk-path)
+	ld -arch x86_64 -e _start -o random-macos-x86_64 macos_x86_64.o -lSystem -syslibroot $$(xcrun --show-sdk-path)
 
 macos-arm: macos_arm64.s
 	as $< -o macos_arm64.o
