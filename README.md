@@ -39,10 +39,10 @@ Each platform uses raw syscalls (Linux/macOS) or native OS APIs (Windows) to gen
 
 | Platform          | Random source         | Executable format | Binary size |
 |-------------------|-----------------------|-------------------|-------------|
-| Linux x86_64      | `getrandom` syscall   | ELF (hand-crafted)| ~245 bytes  |
-| macOS x86_64      | `getentropy` syscall  | Mach-O            | —           |
-| macOS ARM64       | `getentropy` syscall  | Mach-O            | —           |
-| Windows x86_64    | `BCryptGenRandom` API | PE                | —           |
+| Linux x86_64      | `getrandom` syscall   | ELF (hand-crafted)| 310 bytes   |
+| macOS x86_64      | `getentropy` syscall  | Mach-O            | 8.4 KB      |
+| macOS ARM64       | `getentropy` syscall  | Mach-O            | 32.8 KB     |
+| Windows x86_64    | `BCryptGenRandom` API | PE                | 3 KB        |
 
 The Linux version uses a hand-crafted ELF header (no linker needed), resulting in a ~245-byte binary. See `linux_x86_64.asm` for detailed comments on every instruction.
 
