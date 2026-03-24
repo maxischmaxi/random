@@ -22,6 +22,17 @@ New-Item -Force -ItemType Directory "$env:USERPROFILE\.local\bin" | Out-Null; In
 
 > Add `%USERPROFILE%\.local\bin` to your `PATH` environment variable.
 
+## Usage
+
+```bash
+random        # 32 bytes → 64 hex characters (default)
+random 8      # 8 bytes → 16 hex characters
+random 64     # 64 bytes → 128 hex characters
+random 256    # 256 bytes → 512 hex characters
+```
+
+The optional argument specifies the number of random bytes to generate. Each byte produces 2 hex characters. If omitted, it defaults to 32 bytes (256 bits).
+
 ## Build from source
 
 Requires [NASM](https://nasm.us/) (`sudo pacman -S nasm` / `sudo apt install nasm` / `brew install nasm`).
