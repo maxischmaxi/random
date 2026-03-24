@@ -55,7 +55,27 @@ Each platform uses raw syscalls (Linux/macOS) or native OS APIs (Windows) to gen
 | macOS ARM64       | `getentropy` syscall  | Mach-O            | 32.8 KB     |
 | Windows x86_64    | `BCryptGenRandom` API | PE                | 3 KB        |
 
-The Linux version uses a hand-crafted ELF header (no linker needed), resulting in a ~245-byte binary. See `linux_x86_64.asm` for detailed comments on every instruction.
+The Linux version uses a hand-crafted ELF header (no linker needed), resulting in a 310-byte binary. See `linux_x86_64.asm` for detailed comments on every instruction.
+
+## Performance
+
+Benchmark: generating 32 random bytes as hex, averaged over 1000 (assembly) / 100 (Node.js) runs on Linux x86_64.
+
+|                  | `random`        | Bun              | Node.js          |
+|------------------|-----------------|------------------|------------------|
+| **Time per run** | ~0.3 ms         | ~9.7 ms          | ~12.9 ms         |
+| **Speedup**      | **~45x faster** | ~1.3x faster     | 1x               |
+| **Binary size**  | 310 bytes       | ~100 MB runtime  | ~124 MB runtime  |
+| **Dependencies** | none            | Bun              | Node.js          |
+
+All three use the same kernel entropy source (`getrandom`). The difference comes from JS runtime startup overhead (V8/JavaScriptCore, JIT compiler, garbage collector).
+
+Commands used:
+```bash
+./random                                                                  # assembly
+bun -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # bun 1.3.9
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # node v24.11.0
+```
 
 ## Files
 
